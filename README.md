@@ -31,14 +31,19 @@ sequence numbers instead of creating a second one.
 Requires Delta (with the `delta` CLI signed in) and Pi.
 
 ```sh
-# a checkout of this directory
-pi install /path/to/delta-pi
-
-# or straight from a repository
-pi install git:github.com/ajmwagar/delta-pi
+pi install git:github.com/ajmwagar/delta-pi   # from the repository
+pi install npm:delta-pi                       # from npm, once published
+pi install /path/to/delta-pi                  # from a local checkout
 ```
 
-Or load it for one run without installing: `pi -e /path/to/delta-pi/delta.ts`.
+Or load it for a single run without installing anything:
+
+```sh
+pi -e /path/to/delta-pi/delta.ts
+```
+
+If you keep extensions as local files, copy `delta.ts` into `~/.pi/agent/extensions/`
+and add `"delta.ts"` to the `extensions` array in `~/.pi/agent/settings.json`.
 
 ## Use
 
@@ -75,8 +80,10 @@ you share) carries no turn.
 - Remote activity is delivered from the moment the watch goes live. The snapshot
   before it is history and is not replayed into Pi's context.
 - Subagents are not recorded as child threads yet.
-- `/delta join` mounts the thread's files and reports the directory; it does not
-  move Pi's working directory into it.
+- `/delta join` mounts the thread's files and reports the directory, but Pi gives
+  extensions no way to change the working directory of a running session, so the
+  join does not move you into the checkout. Start a session there with
+  `cd <directory> && pi`.
 - Delta's `integration register` currently only knows `claude-code`, so the CLI
   cannot advertise this plugin to Delta clients yet.
 
@@ -90,3 +97,8 @@ bun run scripts/watch-smoke.ts # `thread watch` output parses as expected
 
 The smoke scripts create a private thread for a throwaway Git repository and
 delete it at the end.
+
+`npm pack --dry-run` shows exactly what a published package contains: `delta.ts`,
+this README, the license, and `package.json` (whose `pi.extensions` field is what
+Pi reads). Publishing a release is `npm login && npm publish` — the version is
+permanent once published, so bump `version` first.

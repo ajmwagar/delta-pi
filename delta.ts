@@ -765,8 +765,12 @@ export class DeltaSession {
 		this.state.directory = ready.directory;
 		saveState(this.state);
 		this.startWatch();
+		// Pi answers tool paths against the process working directory and gives
+		// extensions no way to move it, so point at the joined checkout instead of
+		// pretending the session is already in it.
 		this.report(
-			`Joined ${this.state.threadId}. Work in ${ready.directory} so your edits sync with the thread.`,
+			`Joined ${this.state.threadId}. Delta placed the thread's files in ${ready.directory}.\n` +
+				`Pi cannot change directory mid-session, so start a session there: cd ${ready.directory} && pi`,
 			"info",
 		);
 	}

@@ -4,11 +4,25 @@
 	"description": "Delta plugin for the Pi coding agent: record a Pi session into a Delta thread and bring shared activity back into Pi",
 	"type": "module",
 	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/ajmwagar/delta-pi.git"
+	},
+	"homepage": "https://github.com/ajmwagar/delta-pi#readme",
+	"bugs": {
+		"url": "https://github.com/ajmwagar/delta-pi/issues"
+	},
+	"keywords": ["pi", "pi-extension", "delta", "coding-agent", "acp"],
+	"engines": {
+		"node": ">=20"
+	},
 	"pi": {
 		"extensions": ["delta.ts"]
 	},
+	"files": ["delta.ts", "README.md", "LICENSE"],
 	"scripts": {
 		"test": "bun test",
-		"smoke": "bun run scripts/smoke.ts"
+		"smoke": "bun run scripts/smoke.ts",
+		"smoke:watch": "bun run scripts/watch-smoke.ts"
 	}
 }
