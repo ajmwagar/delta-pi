@@ -5,6 +5,7 @@ import {
 	snapshotUpdates,
 	historyNotice,
 	SNAPSHOT_TOKEN_BUDGET,
+	DeltaSession,
 	authorName,
 	batches,
 	emptyState,
@@ -355,5 +356,20 @@ describe("tool records", () => {
 			isError: false,
 		});
 		expect(update.rawOutput).toBeNull();
+	});
+});
+
+describe("audience", () => {
+	test("unshare before sharing says what to do", async () => {
+		const session = new DeltaSession(
+			{} as never,
+			{
+				cwd: "/tmp",
+				hasUI: false,
+				abort: () => {},
+				sessionManager: { getSessionId: () => `audience-${Date.now()}`, getEntries: () => [] },
+			} as never,
+		);
+		await expect(session.unshare()).rejects.toThrow(/no Delta thread yet/);
 	});
 });

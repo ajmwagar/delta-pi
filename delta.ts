@@ -838,7 +838,17 @@ export class DeltaSession {
 	/** Create or find this session's thread, publish it, and start recording. */
 	async share(ctx: ExtensionContext): Promise<void> {
 		if (this.sharing && this.state.threadId) {
-			this.report(`Already recording into ${this.state.url ?? this.state.threadId}`, "info");
+			if (this.state.visibility === "organization") {
+				this.report(`Already shared with your organization: ${this.state.url ?? this.state.threadId}`, "info");
+				return;
+			}
+			// A thread that already syncs can still be widened: only the other
+			// direction needs care, because invites survive and people may have read it.
+			await verifyContract();
+			await deltaJson(["thread", "share", this.state.threadId, "--visibility", "organization"]);
+			this.state.visibility = "organization";
+			saveState(this.state);
+			this.report(`Shared with your organization: ${this.state.url ?? this.state.threadId}`, "info");
 			return;
 		}
 		await verifyContract();
@@ -934,6 +944,27 @@ export class DeltaSession {
 		this.report(
 			`Joined ${this.state.threadId}. Delta placed the thread's files in ${ready.directory}.\n` +
 				`Pi cannot change directory mid-session, so start a session there: cd ${ready.directory} && pi`,
+			"info",
+		);
+	}
+
+	/**
+	 * Make this thread private again, keeping recorded activity and invites.
+	 *
+	 * Delta keeps syncing, so recording and the watch carry on; only the
+	 * organization's access goes away. People already invited keep theirs, which
+	 * is why this is not the inverse of sharing with a team.
+	 */
+	async unshare(): Promise<void> {
+		if (!this.state.threadId) {
+			throw new DeltaError("not_shared", "This session has no Delta thread yet. Run `/delta share` first.");
+		}
+		await verifyContract();
+		await deltaJson(["thread", "unshare", this.state.threadId]);
+		this.state.visibility = "private";
+		saveState(this.state);
+		this.report(
+			"This thread is private. Explicitly invited people still have access, and recording continues.",
 			"info",
 		);
 	}
@@ -1187,10 +1218,11 @@ function describe(error: unknown): string {
 let current: DeltaSession | undefined;
 
 const HELP = [
-	"`/delta share` — publish this Pi session as a Delta thread and keep it recorded",
+	"`/delta share` — publish this Pi session as a Delta thread (or share it with your organization)",
 	"`/delta join <link>` — work in a thread someone shared with you",
 	"`/delta status` — thread, audience, and pending records for this session",
 	"`/delta sync` — send records that are still queued",
+	"`/delta unshare` — make this thread private again; invited people keep access",
 	"`/delta leave` — stop recording and release this session's Delta mounts",
 ].join("\n");
 
@@ -1251,6 +1283,9 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 						await session.leave();
 						ctx.ui.notify("Stopped recording into Delta.", "info");
 						return;
+			case "unshare":
+				await session.unshare();
+				return;
 					default:
 						ctx.ui.notify(HELP, "info");
 						return;

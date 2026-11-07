@@ -48,15 +48,19 @@ and add `"delta.ts"` to the `extensions` array in `~/.pi/agent/settings.json`.
 ## Use
 
 ```
-/delta share          # create this session's thread, publish it, start recording
+/delta share          # create this session's thread, or widen it to your organization
 /delta join <link>    # work in a thread someone shared with you
 /delta status         # thread, audience, pending records, mount state
 /delta sync           # send anything still queued
+/delta unshare        # make the thread private again; invited people keep access
 /delta leave          # stop recording, release the mounts
 ```
 
 `/delta share` asks who should be able to open the thread (just you, or your
 organization) before anything is uploaded, and prints the link when it is done.
+Audience is not one-way: `/delta share` on a private thread widens it, and
+`/delta unshare` narrows it back. Moves between devices continue either way, and
+people already invited keep their access.
 
 ## How recording works
 
