@@ -109,6 +109,36 @@ the ones left out and the command that reads them back.
 - Delta's `integration register` currently only knows `claude-code`, so the CLI
   cannot advertise this plugin to Delta clients yet.
 
+## Fleet sync
+
+A Delta thread list is per computer. The thread id is local to the machine that
+recorded it, and only the share id (`thread_…`) resolves anywhere, so moving a
+thread between your own machines means opening its link there. `scripts/fleet.sh`
+closes that loop over ssh:
+
+```sh
+./scripts/fleet.sh                    # which active threads each machine has
+./scripts/fleet.sh --apply            # pull what each machine is missing
+./scripts/fleet.sh --apply --limit 3  # bound the pulls per machine
+./scripts/fleet.sh --hosts studio,neo # ignore the configured list
+```
+
+Hosts come from `--hosts` or from `~/.pi/agent/delta-fleet`, one name per line:
+
+```
+averys-mac-studio
+averys-macbook-neo
+```
+
+Pulls are deliberate, not automatic: a machine that clones every thread pays
+disk for conversations it never opens, and archived threads are skipped unless
+you pass `--include-archived`. Counts in the report are active threads, with the
+archived total beside them.
+
+This is a stopgap. Delta has no account-wide thread index — `thread sync` only
+takes local ids, and signing in elsewhere does not populate the sidebar list — so
+discovery has to happen somewhere, and today that is your own host list.
+
 ## Development
 
 ```sh
