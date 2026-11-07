@@ -14,6 +14,7 @@
 #   ./fleet.sh --apply                  # pull what is missing
 #   ./fleet.sh --apply --limit 3        # at most three pulls per machine
 #   ./fleet.sh --hosts studio,neo       # ignore the configured list
+#   ./fleet.sh --apply --pull-to neo    # only pull into one machine
 #
 # Deliberately opt-in per pull: a machine that clones every thread pays disk for
 # conversations it never opens, and archived threads only free local history
@@ -25,6 +26,7 @@ APPLY=0
 LIMIT=0
 HOSTS_ARG=""
 INCLUDE_ARCHIVED=0
+PULL_TO=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -32,6 +34,7 @@ while [ $# -gt 0 ]; do
 		--limit) LIMIT="${2:-0}"; shift ;;
 		--hosts) HOSTS_ARG="${2:-}"; shift ;;
 		--include-archived) INCLUDE_ARCHIVED=1 ;;
+		--pull-to) PULL_TO="${2:-}"; shift ;;
 		-h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 		*) echo "fleet: unknown option $1" >&2; exit 2 ;;
 	esac
@@ -106,8 +109,14 @@ threads_on() { # host delta
 }
 
 pull_on() { # host delta join_id
-	local host="$1" delta="$2" id="$3"
-	run_on "$host" "'$delta' --json thread show https://delta.dev/join/$id --format summarize" >/dev/null 2>&1
+	local host="$1" delta="$2" id="$3" link="https://delta.dev/join/$3"
+	run_on "$host" "'$delta' --json thread show $link --format summarize" >/dev/null 2>&1 || return 1
+	# Delta files a pulled thread as archived on the target machine, where the app
+	# will not show it, so unarchive it unless archived threads were requested.
+	if [ "$INCLUDE_ARCHIVED" != "1" ]; then
+		run_on "$host" "'$delta' --json thread unarchive $link" >/dev/null 2>&1
+	fi
+	return 0
 }
 
 ALL=$(hosts) || exit 1
@@ -145,6 +154,9 @@ for host in $ALL; do
 	[ -n "$delta" ] || continue
 	own=$(printf '%s\n' "$(threads_on "$host" "$delta" 2>/dev/null)" | cut -f1 | sed '/^$/d' | sort -u)
 	[ -n "$own" ] || continue
+	if [ -n "$PULL_TO" ] && ! printf '%s' "$PULL_TO" | tr ',' '\n' | grep -qx "$host"; then
+		continue
+	fi
 	missing=$(cut -f1 "$CATALOG" | sort -u | while read -r id; do
 		printf '%s\n' "$own" | grep -qx "$id" || printf '%s\n' "$id"
 	done)
