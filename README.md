@@ -155,3 +155,18 @@ delete it at the end.
 this README, the license, and `package.json` (whose `pi.extensions` field is what
 Pi reads). Publishing a release is `npm login && npm publish` — the version is
 permanent once published, so bump `version` first.
+
+## Known limits
+
+- **Thread tags don't sync.** Tags are a desktop-sidebar adornment keyed to a
+  local thread entry: there is no tag table, column, or row in the replicated
+  graph (`app_threads` columns are name, archived, join_id, status, pinned
+  position, last prompted… — no tag), and the CLI doesn't expose them either.
+  `fleet.sh` cannot move them. Either Delta syncs them natively (product
+  change) or we keep our own sidecar mapping `thread_… → tag set` under
+  `delta-fleet`; deferred until there's time.
+- **Same problem for the thread list itself.** Signing in on a second
+  machine does not populate its desktop list; `fleet.sh` is the interim.
+- **Settings sync is already correct.** The `boot` block (appearance, fonts,
+  layout, proxy) is byte-identical on Studio and Neo; only the device-bound
+  `secure` keychain blob differs, which is by design.
