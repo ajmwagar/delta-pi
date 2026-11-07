@@ -72,11 +72,17 @@ Turn shape, per Delta's contract: a run opens with a `running` state update whos
 and it closes with an `idle` update. History (the session so far, recorded when
 you share) carries no turn.
 
+Sharing returns as soon as the thread exists and is watching, so Pi's input is
+never held while the backfill uploads. The backfill itself is capped at roughly
+100k tokens: the newest messages are sent, and one notice in the transcript names
+the ones left out and the command that reads them back.
+
 ## Known limits
 
 - Messages are recorded when complete; streaming partial updates are not sent.
-- Tool records carry the call's title, kind, input, and output, but not a patch.
-  File changes reach Delta through the mounted checkout, not the transcript.
+- An edit or write is recorded as a unified patch, so Delta draws it as a diff.
+  Every other tool keeps its text output, clipped at 8k characters with a
+  marker naming what was left out, so one huge command cannot stall recording.
 - Remote activity is delivered from the moment the watch goes live. The snapshot
   before it is history and is not replayed into Pi's context.
 - Subagents are not recorded as child threads yet.

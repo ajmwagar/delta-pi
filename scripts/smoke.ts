@@ -62,15 +62,33 @@ const ctx = {
 	abort: () => {},
 	sessionManager: {
 		getSessionId: () => sessionId,
-		getEntries: () => [
+		getEntries: () => history(),
+	},
+};
+
+/** `--long` fills the session with about 100k tokens of history. */
+const historyCount = Number(process.env.SMOKE_HISTORY ?? 0) || (process.argv.includes("--long") ? 300 : 0);
+const long = historyCount > 0;
+
+function history(): unknown[] {
+	if (!long) {
+		return [
 			{
 				type: "message",
 				id: "history-1",
 				message: { role: "user", content: "Earlier question from the session history." },
 			},
-		],
-	},
-};
+		];
+	}
+	return Array.from({ length: historyCount }, (_, index) => ({
+		type: "message",
+		id: `history-${index}`,
+		message: {
+			role: index % 2 === 0 ? "user" : "assistant",
+			content: [{ type: "text", text: `history ${index} ${"context ".repeat(180)}` }],
+		},
+	}));
+}
 
 const session = new DeltaSession(pi as never, ctx as never);
 
@@ -78,7 +96,9 @@ try {
 	makeRepository();
 	await verifyContract();
 
+	const shareStarted = Date.now();
 	await session.share(ctx as never);
+	console.log(`share returned in ${Date.now() - shareStarted} ms`);
 	console.log(`shared: ${session.statusText().replace(/\n/g, " | ")}`);
 	threadId = session.statusText().match(/Thread: (\S+)/)?.[1];
 	if (!threadId) throw new Error("share did not report a thread id");
@@ -100,6 +120,44 @@ try {
 		content: [{ type: "text", text: "# smoke" }],
 		isError: false,
 	});
+	// An edit carries a unified patch, which should record as a diff, and a huge
+	// command output should be clipped rather than sent whole.
+	session.recordMessage("live-4", {
+		role: "assistant",
+		content: [{ type: "toolCall", id: "call-2", name: "edit", arguments: { path: path.join(checkout, "README.md") } }],
+	});
+	session.recordMessage("live-5", {
+		role: "toolResult",
+		toolCallId: "call-2",
+		toolName: "edit",
+		content: [{ type: "text", text: "edited" }],
+		details: {
+			patch: [
+				"diff --git a/README.md b/README.md",
+				"--- a/README.md",
+				"+++ b/README.md",
+				"@@ -1 +1,2 @@",
+				" # smoke",
+				"+recorded by delta-pi",
+				"",
+			].join("\n"),
+			diff: "1: # smoke\n+2: recorded by delta-pi",
+		},
+		isError: false,
+	});
+	session.recordMessage("live-6", {
+		role: "assistant",
+		content: [{ type: "toolCall", id: "call-3", name: "bash", arguments: { command: "yes | head -c 400000" } }],
+	});
+	session.recordMessage("live-7", {
+		role: "toolResult",
+		toolCallId: "call-3",
+		toolName: "bash",
+		content: [{ type: "text", text: "y\n".repeat(200_000) }],
+		details: { stdout: "y\n".repeat(200_000) },
+		isError: false,
+	});
+	session.turnEnded();
 	session.turnEnded();
 	await session.flush();
 	console.log(`after flush: ${session.statusText().replace(/\n/g, " | ")}`);
@@ -111,21 +169,37 @@ try {
 	console.log(`status: visibility=${status.visibility} producer=${JSON.stringify(status.producer)}`);
 	if (status.producer.turn?.status !== "finished") throw new Error("the turn did not finish");
 
-	const summary = await deltaJson<{ messages: { number: number }[] }[]>(["thread", "show", threadId, "--format", "summarize"]);
-	const count = summary[0]?.messages.length ?? 0;
-	const shown = JSON.stringify(
-		await deltaJson(["thread", "show", threadId, "--format", "messages", "--messages", `1-${count}`]),
-	);
-	for (const expected of [
-		"Earlier question from the session history.",
+	const summary = await deltaJson<{ messages: { number: number }[] }[]>(["thread", "show", threadId, "--format", "summarize"]);	const count = summary[0]?.messages.length ?? 0;
+	// `show --messages` reads at most 20 messages per call, like the notice says.
+	let shown = "";
+	for (let first = 1; first <= count; first += 20) {
+		const last = Math.min(first + 19, count);
+		shown += JSON.stringify(
+			await deltaJson(["thread", "show", threadId, "--format", "messages", "--messages", `${first}-${last}`]),
+		);
+	}
+	const expected = [
 		"Please inspect this change.",
 		"The change adds validation.",
 		"Look at README first.",
 		"# smoke",
-	]) {
-		if (!shown.includes(expected)) throw new Error(`transcript is missing: ${expected}`);
+	];
+	if (long) {
+		// The oldest history is left out, and the notice says how to read it.
+		expected.push(`history ${historyCount - 1} `, "left out of the transcript");
+	} else {
+		expected.push("Earlier question from the session history.");
 	}
-	console.log(`transcript has all ${count} messages, the thought, and the tool call`);
+	for (const text of expected) {
+		if (!shown.includes(text)) throw new Error(`transcript is missing: ${text}`);
+	}
+	if (!shown.includes("```diff")) throw new Error("the edit was not recorded as a patch");
+	if (!shown.includes("more characters]")) throw new Error("the huge tool output was not clipped");
+	if (long && shown.includes("history 0 context")) throw new Error("the oldest history was exported");
+	console.log(
+		`transcript has ${count} messages, the thought, and the tool call` +
+			(long ? "; the oldest history was left out and named in a notice" : ""),
+	);
 } catch (error) {
 	console.error("smoke failed:", error instanceof DeltaError ? error.message : error);
 	process.exitCode = 1;

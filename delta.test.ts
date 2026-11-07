@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+	clipForRecord,
+	TOOL_BLOCK_LIMIT,
+	snapshotUpdates,
+	historyNotice,
+	SNAPSHOT_TOKEN_BUDGET,
 	authorName,
 	batches,
 	emptyState,
@@ -222,5 +227,133 @@ describe("remote text", () => {
 	test("falls back when Delta has no name yet", () => {
 		expect(authorName(null)).toBe("Someone in Delta");
 		expect(itemText({ text: "x" })).toBe("x");
+	});
+});
+
+describe("snapshot", () => {
+	const entries = (texts: string[]) =>
+		texts.map((text, index) => ({
+			type: "message",
+			id: `e${index}`,
+			message: { role: "assistant", content: [{ type: "text", text }] },
+		}));
+
+	test("keeps the whole session when it fits the budget", () => {
+		const plan = snapshotUpdates(entries(["one", "two"]));
+		expect(plan.omitted).toBe(0);
+		expect(plan.total).toBe(2);
+		expect(plan.updates).toHaveLength(2);
+	});
+
+	test("keeps the newest messages and counts the rest as omitted", () => {
+		const plan = snapshotUpdates(entries(["old".repeat(200), "middle".repeat(200), "newest"]), {
+			budget: 400,
+		});
+		expect(plan.total).toBe(3);
+		expect(plan.omitted).toBe(2);
+		expect(JSON.stringify(plan.updates)).toContain("newest");
+		expect(JSON.stringify(plan.updates)).not.toContain("middle");
+	});
+
+	test("always keeps the newest message, even past the budget", () => {
+		const plan = snapshotUpdates(entries(["a".repeat(5_000)]), { budget: 10 });
+		expect(plan.updates).toHaveLength(1);
+	});
+
+	test("clips one oversized block and says how much it left out", () => {
+		const [update] = snapshotUpdates(entries(["x".repeat(20_000)]), { budget: 10 }).updates;
+		const text = (update.content as { text: string }[])[0].text;
+		expect(text.length).toBeLessThan(20_000);
+		expect(text).toContain("more characters]");
+	});
+
+	test("the default budget is 100k tokens", () => {
+		expect(SNAPSHOT_TOKEN_BUDGET).toBe(100_000);
+	});
+
+	test("the notice names the thread and how to read the rest", () => {
+		const notice = historyNotice(12, 40, "ksQQthread");
+		expect(notice).toContain("40 messages");
+		expect(notice).toContain("12 oldest");
+		expect(notice).toContain("delta thread show ksQQthread --format messages --messages 1-20");
+	});
+});
+
+describe("tool records", () => {
+	const patch = [
+		"diff --git a/src/a.ts b/src/a.ts",
+		"--- a/src/a.ts",
+		"+++ b/src/a.ts",
+		"@@ -1,1 +1,1 @@",
+		"-old",
+		"+new",
+		"",
+	].join("\n");
+
+	test("an edit's patch becomes a diff block naming the file", () => {
+		const [update] = messageUpdates("e9", {
+			role: "toolResult",
+			toolCallId: "call-9",
+			toolName: "edit",
+			content: [{ type: "text", text: "edited" }],
+			details: { patch, diff: "-old\n+new" },
+			isError: false,
+		}, "/repo");
+		expect(update).toMatchObject({
+			sessionUpdate: "tool_call_update",
+			toolCallId: "call-9",
+			status: "completed",
+			rawOutput: null,
+			content: [
+				{
+					type: "diff",
+					changes: [{ operation: "modify", path: "/repo/src/a.ts" }],
+					patch: { format: "git_patch", text: patch },
+				},
+			],
+		});
+	});
+
+	test("a new file's patch is recorded as an add", () => {
+		const added = ["diff --git a/n.ts b/n.ts", "new file mode 100644", "--- /dev/null", "+++ b/n.ts", "@@ -0,0 +1 @@", "+x", ""].join(
+			"\n",
+		);
+		const [update] = messageUpdates("e10", {
+			role: "toolResult",
+			toolCallId: "call-10",
+			toolName: "write",
+			content: [],
+			details: { patch: added },
+			isError: false,
+		});
+		const diff = (update.content as { changes: { operation: string }[] }[])[0];
+		expect(diff.changes[0].operation).toBe("add");
+	});
+
+	test("a live tool result is clipped so Delta will accept it", () => {
+		const huge = "x".repeat(1_000_000);
+		const [update] = messageUpdates("e11", {
+			role: "toolResult",
+			toolCallId: "call-11",
+			toolName: "bash",
+			content: [{ type: "text", text: huge }],
+			isError: false,
+		});
+		const clipped = clipForRecord(update);
+		const text = JSON.stringify(clipped);
+		expect(text.length).toBeLessThan(TOOL_BLOCK_LIMIT + 2_000);
+		expect(text).toContain("more characters]");
+	});
+
+	test("a tool's huge details are not duplicated beside its output", () => {
+		const [update] = messageUpdates("e12", {
+			role: "toolResult",
+			toolCallId: "call-12",
+			toolName: "bash",
+			content: [{ type: "text", text: "ok" }],
+			details: { stdout: "x".repeat(5_000) },
+			isError: false,
+		});
+		expect(update.rawOutput).toBeNull();
 	});
 });

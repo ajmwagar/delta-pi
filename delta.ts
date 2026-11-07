@@ -357,19 +357,63 @@ export function messageUpdates(entryId: string, message: unknown, root?: string)
 	}
 
 	if (role === "toolResult" && typeof value.toolCallId === "string") {
-		const blocks = parts.map(contentBlock).filter((block): block is Record<string, unknown> => !!block);
+		// An edit's unified patch reads as a diff in Delta, the way the reference
+		// plugin records Claude's Edit and Write calls, instead of as a wall of text.
+		const diff = patchDiff(value.details, root);
+		const blocks = diff
+			? []
+			: parts.map(contentBlock).filter((block): block is Record<string, unknown> => !!block);
 		return [
 			{
 				sessionUpdate: "tool_call_update",
 				toolCallId: value.toolCallId,
 				status: value.isError === true ? "failed" : "completed",
-				rawOutput: value.details ?? null,
-				...(blocks.length ? { content: blocks.map((block) => ({ type: "content", content: block })) } : {}),
+				rawOutput: diff ? null : smallDetails(value.details),
+				...(diff
+					? { content: [diff] }
+					: blocks.length
+						? { content: blocks.map((block) => ({ type: "content", content: block })) }
+						: {}),
 			},
 		];
 	}
 
 	return [];
+}
+
+
+/** A tool's structured details, kept only when small enough to sit beside its output. */
+function smallDetails(details: unknown): unknown {
+	if (details == null) return null;
+	try {
+		const text = JSON.stringify(details);
+		return text && text.length <= 2_000 ? details : null;
+	} catch {
+		return null;
+	}
+}
+/**
+ * An edit's unified patch as an ACP diff block, naming the file it changes.
+ *
+ * ACP names changed files by absolute path, so the patch's own headers are
+ * resolved against the checkout when it is known.
+ */
+export function patchDiff(details: unknown, root?: string): Record<string, unknown> | undefined {
+	if (!details || typeof details !== "object") return undefined;
+	const patch = (details as { patch?: unknown }).patch;
+	if (typeof patch !== "string" || !patch.trim()) return undefined;
+	const file = /^\+\+\+ b\/(.+)$/m.exec(patch)?.[1] ?? /^--- a\/(.+)$/m.exec(patch)?.[1];
+	if (!file) return undefined;
+	const operation = /^new file mode/m.test(patch)
+		? "add"
+		: /^deleted file mode/m.test(patch)
+			? "delete"
+			: "modify";
+	return {
+		type: "diff",
+		changes: [{ operation, path: root ? path.join(root, file) : file }],
+		patch: { format: "git_patch", text: patch },
+	};
 }
 
 /** One saved outbox line, keeping each record's own turn association. */
@@ -384,7 +428,9 @@ export function recordLine(sequence: number, update: Update, turnSequence?: numb
  * Add a record to the durable outbox before it is sent.
  *
  * A turn's own start is the only update that may name its own sequence: the
- * `running` state update recorded as sequence N carries `turnSequence` N.
+ * `running` state update recorded as sequence N carries `turnSequence` N. The
+ * record is clipped first, so one enormous tool result cannot make a record
+ * Delta will refuse.
  */
 export function enqueue(
 	state: SessionState,
@@ -394,7 +440,8 @@ export function enqueue(
 	const sequence = state.next;
 	const turnSequence =
 		update.sessionUpdate === "state_update" && update.state === "running" ? sequence : options.turnSequence;
-	state.pending.push({ sequence, turnSequence, line: recordLine(sequence, update, turnSequence) });
+	const record = clipForRecord(update);
+	state.pending.push({ sequence, turnSequence, line: recordLine(sequence, record, turnSequence) });
 	state.next = sequence + 1;
 	options.save(state);
 	return sequence;
@@ -449,6 +496,105 @@ export function batches(pending: readonly PendingRecord[], limit = 2_000_000): P
 	}
 	if (batch.length) result.push(batch);
 	return result;
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot: the session a thread starts with
+// ---------------------------------------------------------------------------
+
+/** Roughly four bytes per token, the estimate Delta's reference plugin uses. */
+export const SNAPSHOT_TOKEN_BUDGET = 100_000;
+const SNAPSHOT_CHAR_BUDGET = SNAPSHOT_TOKEN_BUDGET * 4;
+/** How much of one content block a snapshot keeps, so one tool dump cannot fill it. */
+const SNAPSHOT_BLOCK_LIMIT = 16_000;
+/** How much of a tool's output a live record keeps; the rest is named, not sent. */
+export const TOOL_BLOCK_LIMIT = 8_000;
+/** How much of one message a live record keeps. Messages are rarely near this. */
+export const MESSAGE_BLOCK_LIMIT = 200_000;
+
+/** Shrink one update's text, naming what it left out. */
+export function clipUpdate(update: Update, limit = SNAPSHOT_BLOCK_LIMIT): Update {
+	const clip = (text: string): string =>
+		text.length <= limit ? text : `${text.slice(0, limit)}\n[… ${text.length - limit} more characters]`;
+	const content = Array.isArray(update.content)
+		? update.content.map((block) => {
+				const value = block as Record<string, unknown>;
+				if (value.type === "text" && typeof value.text === "string") {
+					return { ...value, text: clip(value.text) };
+				}
+				if (value.type === "content" && value.content && typeof value.content === "object") {
+					const inner = value.content as Record<string, unknown>;
+					if (inner.type === "text" && typeof inner.text === "string") {
+						return { ...value, content: { ...inner, text: clip(inner.text) } };
+					}
+				}
+				return value;
+			})
+		: update.content;
+	const rawOutput = typeof update.rawOutput === "string" ? clip(update.rawOutput) : update.rawOutput;
+	return { ...update, ...(content === undefined ? {} : { content }), ...(rawOutput === undefined ? {} : { rawOutput }) };
+}
+
+/**
+ * Keep one record small.
+ *
+ * Delta rejects a record over 16 MiB, and a single command can print more than
+ * that; tool output is the only part of a session that routinely does. Anything
+ * cut is named in the record, so the transcript never silently loses text.
+ */
+export function clipForRecord(update: Update): Update {
+	const limit = update.sessionUpdate === "tool_call_update" ? TOOL_BLOCK_LIMIT : MESSAGE_BLOCK_LIMIT;
+	return clipUpdate(update, limit);
+}
+/** What a thread's transcript says about the part of the session it leaves out. */
+export function historyNotice(omitted: number, total: number, thread: string): string {
+	return (
+		`[Delta] This Pi session already had ${total} messages when recording started; ` +
+		`the ${omitted} oldest were left out of the transcript. Read them with ` +
+		`\`delta thread show ${thread} --format messages --messages 1-20\` (20 messages per call).`
+	);
+}
+
+export type SnapshotPlan = { updates: Update[]; omitted: number; total: number };
+
+/**
+ * The newest part of a session that fits the snapshot budget.
+ *
+ * A long session would otherwise take minutes to stream and fill the thread with
+ * history nobody rereads. Messages are taken from the newest backwards until the
+ * budget is spent, and `omitted` says how many older ones the thread leaves out;
+ * the CLI can read them back. The newest message is always included.
+ */
+export function snapshotUpdates(
+	entries: readonly unknown[],
+	options: { root?: string; budget?: number } = {},
+): SnapshotPlan {
+	const budget = options.budget ?? SNAPSHOT_CHAR_BUDGET;
+	const messages = entries.flatMap((entry) => {
+		const value = entry as { id?: unknown; type?: unknown; message?: unknown };
+		return value.type === "message" && typeof value.id === "string" && value.message
+			? [{ id: value.id, message: value.message }]
+			: [];
+	});
+	const groups = messages.map((message) => {
+		const updates = messageUpdates(message.id, message.message, options.root).map((update) => clipUpdate(update));
+		const size = updates.reduce((total, update) => total + Buffer.byteLength(JSON.stringify(update)), 0);
+		return { updates, size };
+	});
+	let first = groups.length;
+	let used = 0;
+	for (let index = groups.length - 1; index >= 0; index -= 1) {
+		const group = groups[index];
+		if (!group) continue;
+		if (first < groups.length && used + group.size > budget) break;
+		used += group.size;
+		first = index;
+	}
+	return {
+		updates: groups.slice(first).flatMap((group) => group.updates),
+		omitted: first,
+		total: messages.length,
+	};
 }
 
 // ============================================================================
@@ -662,16 +808,29 @@ export class DeltaSession {
 		this.record({ sessionUpdate: "session_info_update", title: name });
 	}
 
-	/** Append the session's history to a thread that was just created. */
+	/**
+	 * Append the session's history to a thread that was just created.
+	 *
+	 * Only the newest part is exported: a thread that starts with a hundred
+	 * thousand tokens of transcript takes a long time to send and is never read
+	 * again. One notice names what was left out and how to read it.
+	 */
 	snapshot(): void {
-		const entries = this.ctx.sessionManager.getEntries();
+		const plan = snapshotUpdates(this.ctx.sessionManager.getEntries(), { root: this.state.checkout });
 		const untouched = (): void => {};
-		for (const entry of entries) {
-			if (entry.type !== "message") continue;
-			const message = (entry as { message?: unknown }).message;
-			for (const update of messageUpdates(entry.id, message, this.state.checkout)) {
-				enqueue(this.state, update, { save: untouched });
-			}
+		if (plan.omitted > 0 && this.state.threadId) {
+			enqueue(
+				this.state,
+				{
+					sessionUpdate: "agent_message",
+					messageId: `${this.state.externalId}:history`,
+					content: [{ type: "text", text: historyNotice(plan.omitted, plan.total, this.state.threadId) }],
+				},
+				{ save: untouched },
+			);
+		}
+		for (const update of plan.updates) {
+			enqueue(this.state, update, { save: untouched });
 		}
 		saveState(this.state);
 	}
@@ -723,13 +882,17 @@ export class DeltaSession {
 		await this.attachCheckout();
 		this.snapshot();
 		this.startWatch();
-		await this.flush();
+		// Report as soon as the thread exists and is watching. Backfilling the
+		// session is local work plus a network upload, so it must not hold the
+		// command (and the session's input) until every record is acknowledged.
+		const queued = this.state.pending.length;
 		this.report(
 			`Recording into Delta (${visibility === "organization" ? "shared with your organization" : "just me"}): ${
 				this.state.url ?? this.state.threadId
-			}`,
+			}${queued ? ` — sending ${queued} record${queued === 1 ? "" : "s"} from this session` : ""}`,
 			"info",
 		);
+		void this.flush();
 	}
 
 	/** Join a thread someone shared, and work in its mounted checkouts. */
