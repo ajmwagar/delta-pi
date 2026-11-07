@@ -12,26 +12,39 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { DeltaError, DeltaSession, deltaJson, runDelta, verifyContract } from "../delta";
+import { DeltaError, DeltaSession, deltaJson, runDelta, stateFile, verifyContract } from "../delta";
 
 const sessionId = `smoke-${Date.now().toString(36)}`;
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "delta-pi-smoke-"));
+
+/**
+ * Scratch space that survives between runs.
+ *
+ * A fresh checkout per run made Delta register a new worktree every time, and
+ * the CLI has no command to delete one, so it accumulates. The path here is
+ * stable: repeated runs reuse the same checkout and therefore the same worktree.
+ */
+const root = path.join(os.tmpdir(), "delta-pi-smoke");
 const checkout = path.join(root, "checkout");
 const remote = path.join(root, "remote.git");
+/** Worktrees are only created for the file-sharing path, which is opt-in. */
+const withWorktree = process.argv.includes("--worktree") || process.env.SMOKE_WORKTREE === "1";
 let threadId: string | undefined;
 
-/** A Git checkout Delta can attach: it needs a remote that has the work. */
+/** A Git checkout Delta can attach: it needs a remote that already has the work. */
 function makeRepository(): void {
-	execFileSync("git", ["init", "-q", "--bare", remote]);
-	fs.mkdirSync(checkout);
-	execFileSync("git", ["init", "-q"], { cwd: checkout });
-	execFileSync("git", ["config", "user.email", "smoke@example.com"], { cwd: checkout });
-	execFileSync("git", ["config", "user.name", "Smoke"], { cwd: checkout });
-	fs.writeFileSync(path.join(checkout, "README.md"), "# smoke\n");
-	execFileSync("git", ["add", "."], { cwd: checkout });
-	execFileSync("git", ["commit", "-qm", "initial"], { cwd: checkout });
-	execFileSync("git", ["remote", "add", "origin", remote], { cwd: checkout });
-	execFileSync("git", ["push", "-q", "origin", "HEAD:main"], { cwd: checkout });
+	fs.mkdirSync(root, { recursive: true });
+	if (!fs.existsSync(remote)) execFileSync("git", ["init", "-q", "--bare", remote]);
+	if (!fs.existsSync(path.join(checkout, ".git"))) {
+		fs.mkdirSync(checkout, { recursive: true });
+		execFileSync("git", ["init", "-q"], { cwd: checkout });
+		execFileSync("git", ["config", "user.email", "smoke@example.com"], { cwd: checkout });
+		execFileSync("git", ["config", "user.name", "Smoke"], { cwd: checkout });
+		fs.writeFileSync(path.join(checkout, "README.md"), "# smoke\n");
+		execFileSync("git", ["add", "."], { cwd: checkout });
+		execFileSync("git", ["commit", "-qm", "initial"], { cwd: checkout });
+		execFileSync("git", ["remote", "add", "origin", remote], { cwd: checkout });
+		execFileSync("git", ["push", "-q", "origin", "HEAD:main"], { cwd: checkout });
+	}
 }
 
 const delivered: unknown[] = [];
@@ -57,7 +70,7 @@ const pi = {
 };
 
 const ctx = {
-	cwd: checkout,
+	cwd: withWorktree ? checkout : root,
 	hasUI: false,
 	abort: () => {},
 	sessionManager: {
@@ -93,7 +106,7 @@ function history(): unknown[] {
 const session = new DeltaSession(pi as never, ctx as never);
 
 try {
-	makeRepository();
+	if (withWorktree) makeRepository(); else fs.mkdirSync(root, { recursive: true });
 	await verifyContract();
 
 	const shareStarted = Date.now();
@@ -210,5 +223,9 @@ try {
 		await runDelta(["--json", "thread", "delete", threadId, "--force"]);
 		console.log(`deleted thread ${threadId}`);
 	}
+	// Nothing of this run survives: no thread, no outbox, no scratch checkout.
+	fs.rmSync(stateFile(sessionId), { force: true });
+	if (withWorktree) fs.rmSync(checkout, { recursive: true, force: true });
+	if (withWorktree) fs.rmSync(remote, { recursive: true, force: true });
 	fs.rmSync(root, { recursive: true, force: true });
 }

@@ -53,8 +53,11 @@ and add `"delta.ts"` to the `extensions` array in `~/.pi/agent/settings.json`.
 /delta status         # thread, audience, pending records, mount state
 /delta sync           # send anything still queued
 /delta unshare        # make the thread private again; invited people keep access
+/delta auto on|off    # whether activity from Delta starts a Pi turn or waits for a prompt
 /delta leave          # stop recording, release the mounts
 ```
+
+Activity from Delta reaches Pi as a message. By default it does not start a turn: the footer counts what is waiting (`2 from Delta waiting`), and your next prompt answers it. `/delta auto on` makes a delivered message start a turn instead, arriving as a follow-up so it never interrupts a running tool call.
 
 `/delta share` asks who should be able to open the thread (just you, or your
 organization) before anything is uploaded, and prints the link when it is done.
@@ -89,6 +92,8 @@ the ones left out and the command that reads them back.
   marker naming what was left out, so one huge command cannot stall recording.
 - Remote activity is delivered from the moment the watch goes live. The snapshot
   before it is history and is not replayed into Pi's context.
+- Delivered activity starts no turn unless `/delta auto on`; nothing reaches Pi
+  while the session is closed.
 - Subagents are not recorded as child threads yet.
 - `/delta join` mounts the thread's files and reports the directory, but Pi gives
   extensions no way to change the working directory of a running session, so the
@@ -103,6 +108,7 @@ the ones left out and the command that reads them back.
 bun test                      # record translation, outbox, receipts, watch parsing
 bun run scripts/smoke.ts      # real thread: share, record a turn, read it back, delete it
 bun run scripts/watch-smoke.ts # `thread watch` output parses as expected
+bun run scripts/delivery-smoke.ts # activity from Delta reaches Pi, with and without auto-turn
 ```
 
 The smoke scripts create a private thread for a throwaway Git repository and

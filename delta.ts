@@ -187,11 +187,13 @@ export type SessionState = {
 	pending: PendingRecord[];
 	/** The last turn this producer recorded, so a resumed session keeps its turn id. */
 	lastTurnSequence?: number;
+	/** Whether activity from Delta starts a Pi turn instead of waiting for a prompt. */
+	autoTurn?: boolean;
 	/** The thread title last recorded, so each rename is recorded once. */
 	title?: string;
 };
 
-function stateFile(sessionId: string): string {
+export function stateFile(sessionId: string): string {
 	return path.join(STATE_DIR, "sessions", `${sessionId.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 
@@ -726,12 +728,18 @@ export class DeltaSession {
 	private live = false;
 	private stopping = false;
 	private lastReported?: string;
-
+	/** How many messages from Delta are waiting for a prompt. */
+	private awaiting = 0;
 	constructor(
 		private readonly pi: ExtensionAPI,
 		private readonly ctx: ExtensionContext,
 	) {
 		this.state = loadState(ctx.sessionManager.getSessionId());
+	}
+
+	/** Whether activity from Delta starts a turn in this session. */
+	get autoTurn(): boolean {
+		return this.state.autoTurn === true;
 	}
 
 	get sharing(): boolean {
@@ -779,7 +787,9 @@ export class DeltaSession {
 
 	/** A turn began: start it in Delta so its content joins one live turn. */
 	turnStarted(): void {
-		if (!this.sharing) return;
+		// A prompt answers what Delta delivered, so the waiting count resets.
+		this.awaiting = 0;
+		if (this.ctx.hasUI) this.ctx.ui.setStatus("delta", undefined);
 		const sequence = enqueue(
 			this.state,
 			{ sessionUpdate: "state_update", state: "running" },
@@ -994,6 +1004,18 @@ export class DeltaSession {
 		this.mounts = [];
 	}
 
+	/** Whether activity from Delta starts a Pi turn, or waits for a prompt. */
+	setAutoTurn(on: boolean): void {
+		this.state.autoTurn = on;
+		saveState(this.state);
+		this.report(
+			on
+				? "Activity from Delta now starts a Pi turn."
+				: "Activity from Delta waits for your next prompt.",
+			"info",
+		);
+	}
+
 	/** What a person needs to see about this session's thread. */
 	statusText(): string {
 		if (!this.state.threadId) return "Not recording into Delta. Run `/delta share` to start.";
@@ -1002,6 +1024,7 @@ export class DeltaSession {
 			this.state.url ? `Link: ${this.state.url}` : undefined,
 			`Audience: ${this.state.visibility ?? "unknown"}`,
 			`Next sequence: ${this.state.next} (${this.state.pending.length} waiting)`,
+			`Delta activity: ${this.state.autoTurn ? "starts a turn" : "waits for a prompt"}`,
 			this.state.directory ? `Working directory: ${this.state.directory}` : undefined,
 			this.state.worktreeReference ? `Worktree: ${this.state.worktreeReference}` : undefined,
 			this.watch ? "Watching for Delta activity." : "Not watching for Delta activity.",
@@ -1095,19 +1118,37 @@ export class DeltaSession {
 				return;
 			}
 			const checkout = top.stdout.trim() || this.ctx.cwd;
-			const created = await deltaJson<{ reference?: string }>(["worktree", "create", checkout], {
-				cwd: checkout,
-			});
-			if (!created.reference) return;
-			await deltaJson(["worktree", "attach", created.reference, "--thread", this.state.threadId!], {
-				cwd: checkout,
-			});
-			this.state.worktreeReference = created.reference;
+			// Reuse this checkout's worktree when Delta already knows it. Creating
+			// another for every share leaves a row in `worktree list` that nothing
+			// removes, and the CLI has no command to delete one.
+			const reference =
+				(await this.knownWorktree(checkout)) ??
+				(await deltaJson<{ reference?: string }>(["worktree", "create", checkout], { cwd: checkout })).reference;
+			if (!reference) return;
+			await deltaJson(["worktree", "attach", reference, "--thread", this.state.threadId!], { cwd: checkout });
+			this.state.worktreeReference = reference;
 			this.state.checkout = checkout;
 			saveState(this.state);
-			this.startMount(created.reference, checkout, true);
+			this.startMount(reference, checkout, true);
 		} catch (error) {
 			this.report(`Could not share files with Delta: ${describe(error)}`, "warning");
+		}
+	}
+
+	/** The worktree Delta already has for this checkout, if any. */
+	private async knownWorktree(checkout: string): Promise<string | undefined> {
+		try {
+			const list = await deltaJson<{
+				worktrees?: { reference?: string; directories?: { directory?: string }[] }[];
+			}>(["worktree", "list"]);
+			const wanted = checkout.replace(/\/+$/, "");
+			return list.worktrees?.find(
+				(tree) =>
+					typeof tree.reference === "string" &&
+					tree.directories?.some((entry) => entry.directory?.replace(/\/+$/, "") === wanted),
+			)?.reference;
+		} catch {
+			return undefined;
 		}
 	}
 
@@ -1157,7 +1198,28 @@ export class DeltaSession {
 				this.startWatch();
 			}, retry);
 			retry = Math.min(retry * 2, 30_000);
+
 		});
+	}
+	/** Hand remote activity to Pi, starting a turn when this session asked for it. */
+	private deliver(text: string): void {
+		if (this.state.autoTurn) {
+			// `followUp` joins a run that is already going instead of interrupting a
+			// tool call, and starts one when Pi is idle.
+			this.pi.sendMessage(
+				{ customType: "delta", content: text, display: true },
+				{ triggerTurn: true, deliverAs: "followUp" },
+			);
+			return;
+		}
+		this.pi.sendMessage({ customType: "delta", content: text, display: true });
+		this.awaiting += 1;
+		if (this.ctx.hasUI) {
+			this.ctx.ui.setStatus(
+				"delta",
+				`${this.awaiting} from Delta waiting — send a prompt to answer (/delta auto on)`,
+			);
+		}
 	}
 
 	private watchEvent(line: string): void {
@@ -1172,19 +1234,11 @@ export class DeltaSession {
 				if (!this.live || !MESSAGE_KINDS.has(event.item.kind)) return;
 				const text = itemText(event.item.content);
 				if (!text?.trim()) return;
-				this.pi.sendMessage({
-					customType: "delta",
-					content: remoteText(event.item.kind, event.item.author, text),
-					display: true,
-				});
+				this.deliver(remoteText(event.item.kind, event.item.author, text));
 				return;
 			}
 			case "comment":
-				this.pi.sendMessage({
-					customType: "delta",
-					content: `**${authorName(event.comment.author)}** commented in Delta: ${event.comment.text}`,
-					display: true,
-				});
+				this.deliver(`**${authorName(event.comment.author)}** commented in Delta: ${event.comment.text}`);
 				return;
 			case "producer.turn":
 				if (event.status === "superseded") this.superseded();
@@ -1222,6 +1276,7 @@ const HELP = [
 	"`/delta join <link>` — work in a thread someone shared with you",
 	"`/delta status` — thread, audience, and pending records for this session",
 	"`/delta sync` — send records that are still queued",
+	"`/delta auto on|off` — whether activity from Delta starts a Pi turn or waits for your prompt",
 	"`/delta unshare` — make this thread private again; invited people keep access",
 	"`/delta leave` — stop recording and release this session's Delta mounts",
 ].join("\n");
@@ -1265,31 +1320,41 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 			const session = current ?? (current = new DeltaSession(pi, ctx));
 			const [command, ...rest] = args.trim().split(/\s+/).filter(Boolean);
 			try {
-				switch (command) {
-					case "share":
-						await session.share(ctx);
-						return;
-					case "join":
-						await session.join(rest.join(" "));
-						return;
-					case "status":
-						ctx.ui.notify(session.statusText(), "info");
-						return;
-					case "sync":
-						await session.flush();
-						ctx.ui.notify(session.statusText(), "info");
-						return;
-					case "leave":
-						await session.leave();
-						ctx.ui.notify("Stopped recording into Delta.", "info");
-						return;
-			case "unshare":
-				await session.unshare();
-				return;
-					default:
-						ctx.ui.notify(HELP, "info");
-						return;
+			switch (command) {
+				case "share":
+					await session.share(ctx);
+					return;
+				case "join":
+					await session.join(rest.join(" "));
+					return;
+				case "status":
+					ctx.ui.notify(session.statusText(), "info");
+					return;
+				case "auto": {
+					const wanted = rest[0];
+					if (wanted === "on" || wanted === "off") session.setAutoTurn(wanted === "on");
+					else
+						ctx.ui.notify(
+							`Delta activity ${session.autoTurn ? "starts a Pi turn" : "waits for your next prompt"}. Use /delta auto on|off.`,
+							"info",
+						);
+					return;
 				}
+				case "sync":
+					await session.flush();
+					ctx.ui.notify(session.statusText(), "info");
+					return;
+				case "unshare":
+					await session.unshare();
+					return;
+				case "leave":
+					await session.leave();
+					ctx.ui.notify("Stopped recording into Delta.", "info");
+					return;
+				default:
+					ctx.ui.notify(HELP, "info");
+					return;
+			}
 			} catch (error) {
 				ctx.ui.notify(`delta: ${describe(error)}`, "error");
 			}
