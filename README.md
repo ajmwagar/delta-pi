@@ -53,11 +53,18 @@ and add `"delta.ts"` to the `extensions` array in `~/.pi/agent/settings.json`.
 /delta status         # thread, audience, pending records, mount state
 /delta sync           # send anything still queued
 /delta unshare        # make the thread private again; invited people keep access
+/delta link           # the link that opens this thread on another computer
 /delta auto on|off    # whether activity from Delta starts a Pi turn or waits for a prompt
 /delta leave          # stop recording, release the mounts
 ```
 
 Activity from Delta reaches Pi as a message. By default it does not start a turn: the footer counts what is waiting (`2 from Delta waiting`), and your next prompt answers it. `/delta auto on` makes a delivered message start a turn instead, arriving as a follow-up so it never interrupts a running tool call.
+
+On another computer, open that link: it pulls the thread into that machine's
+local store, where the Delta app lists it. Delta keeps no account-wide thread
+index — signing in elsewhere does not fill the sidebar — so the link (or `delta
+thread show <link>`, or `/delta join <link>` in Pi) is how a thread moves between
+your own machines. `/delta link` prints it again at any time.
 
 `/delta share` asks who should be able to open the thread (just you, or your
 organization) before anything is uploaded, and prints the link when it is done.

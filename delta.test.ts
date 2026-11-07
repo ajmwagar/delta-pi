@@ -5,6 +5,7 @@ import {
 	snapshotUpdates,
 	historyNotice,
 	SNAPSHOT_TOKEN_BUDGET,
+	joinLink,
 	DeltaSession,
 	authorName,
 	batches,
@@ -371,5 +372,13 @@ describe("audience", () => {
 			} as never,
 		);
 		await expect(session.unshare()).rejects.toThrow(/no Delta thread yet/);
+	});
+});
+
+describe("portable link", () => {
+	test("a share id becomes the link another device opens", () => {
+		expect(joinLink("thread_01m6t92mc8afv22bm7n28k6398")).toBe(
+			"https://delta.dev/join/thread_01m6t92mc8afv22bm7n28k6398",
+		);
 	});
 });

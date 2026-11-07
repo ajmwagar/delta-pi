@@ -175,6 +175,8 @@ export type SessionState = {
 	externalId: string;
 	threadId?: string;
 	url?: string;
+	/** The portable link other devices can open, once Delta reports one. */
+	link?: string;
 	/** The audience the thread was created with. */
 	visibility?: "private" | "organization";
 	/** The worktree Delta attached for this checkout, and where it is mounted. */
@@ -681,6 +683,11 @@ export function itemText(content: Record<string, unknown>): string | undefined {
 /** Item kinds whose text belongs in Pi's context. */
 export const MESSAGE_KINDS = new Set(["user_message", "agent_message", "cross_agent_message"]);
 
+/** The portable link Delta's share id stands for. */
+export function joinLink(joinId: string): string {
+	return `https://delta.dev/join/${joinId}`;
+}
+
 /** A short name for who wrote an item. */
 export function authorName(author: ThreadUser | null): string {
 	return author?.name?.trim() || "Someone in Delta";
@@ -736,6 +743,37 @@ export class DeltaSession {
 	) {
 		this.state = loadState(ctx.sessionManager.getSessionId());
 	}
+
+	/**
+	 * The link that reaches this thread from another device.
+	 *
+	 * A thread id is local to the computer that recorded it, so it is useless on
+	 * another machine; Delta's share id (`thread_…`) is the portable one. The CLI
+	 * has no command that prints it, so it comes from `thread list`.
+	 */
+	async portableLink(attempts = 5): Promise<string | undefined> {
+		if (this.state.link) return this.state.link;
+		if (this.state.url) return this.state.url;
+		if (!this.state.threadId) return undefined;
+		// A freshly created thread reaches `thread list` a moment after the CLI
+		// creates it, so a quick lookup can miss it.
+		for (let attempt = 0; attempt < attempts; attempt += 1) {
+			try {
+				const list = await deltaJson<{ id?: string; join_id?: string }[]>(["thread", "list"]);
+				const entry = Array.isArray(list) ? list.find((thread) => thread.id === this.state.threadId) : undefined;
+				if (entry?.join_id) {
+					this.state.link = joinLink(entry.join_id);
+					saveState(this.state);
+					return this.state.link;
+				}
+			} catch {
+				// Keep trying: the answer is convenience, not correctness.
+			}
+			if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, 400));
+		}
+		return undefined;
+	}
+
 
 	/** Whether activity from Delta starts a turn in this session. */
 	get autoTurn(): boolean {
@@ -906,10 +944,12 @@ export class DeltaSession {
 		// session is local work plus a network upload, so it must not hold the
 		// command (and the session's input) until every record is acknowledged.
 		const queued = this.state.pending.length;
+		// Another device needs the portable link, not this computer's thread id.
+		await this.portableLink();
 		this.report(
 			`Recording into Delta (${visibility === "organization" ? "shared with your organization" : "just me"}): ${
-				this.state.url ?? this.state.threadId
-			}${queued ? ` — sending ${queued} record${queued === 1 ? "" : "s"} from this session` : ""}`,
+				this.state.link ?? this.state.url ?? this.state.threadId
+			}${queued ? ` — sending ${queued} record${queued === 1 ? "" : "s"} from this session` : ""}` + (this.state.link ? "\nOpen it on another computer with that link, or `/delta join` there." : ""),
 			"info",
 		);
 		void this.flush();
@@ -1021,7 +1061,9 @@ export class DeltaSession {
 		if (!this.state.threadId) return "Not recording into Delta. Run `/delta share` to start.";
 		const lines = [
 			`Thread: ${this.state.threadId}`,
-			this.state.url ? `Link: ${this.state.url}` : undefined,
+			this.state.link ?? this.state.url
+				? `Link: ${this.state.link ?? this.state.url}`
+				: undefined,
 			`Audience: ${this.state.visibility ?? "unknown"}`,
 			`Next sequence: ${this.state.next} (${this.state.pending.length} waiting)`,
 			`Delta activity: ${this.state.autoTurn ? "starts a turn" : "waits for a prompt"}`,
@@ -1276,6 +1318,7 @@ const HELP = [
 	"`/delta join <link>` — work in a thread someone shared with you",
 	"`/delta status` — thread, audience, and pending records for this session",
 	"`/delta sync` — send records that are still queued",
+	"`/delta link` — the link that opens this thread on another computer or in Delta Web",
 	"`/delta auto on|off` — whether activity from Delta starts a Pi turn or waits for your prompt",
 	"`/delta unshare` — make this thread private again; invited people keep access",
 	"`/delta leave` — stop recording and release this session's Delta mounts",
@@ -1328,8 +1371,17 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 					await session.join(rest.join(" "));
 					return;
 				case "status":
+					await session.portableLink();
 					ctx.ui.notify(session.statusText(), "info");
 					return;
+				case "link": {
+					const link = await session.portableLink();
+					ctx.ui.notify(
+						link ?? "No link yet. Run `/delta share` first, or wait for Delta to finish uploading.",
+						link ? "info" : "warning",
+					);
+					return;
+				}
 				case "auto": {
 					const wanted = rest[0];
 					if (wanted === "on" || wanted === "off") session.setAutoTurn(wanted === "on");
