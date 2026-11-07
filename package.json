@@ -1,0 +1,14 @@
+{
+	"name": "delta-pi",
+	"version": "0.1.0",
+	"description": "Delta plugin for the Pi coding agent: record a Pi session into a Delta thread and bring shared activity back into Pi",
+	"type": "module",
+	"license": "MIT",
+	"pi": {
+		"extensions": ["delta.ts"]
+	},
+	"scripts": {
+		"test": "bun test",
+		"smoke": "bun run scripts/smoke.ts"
+	}
+}
